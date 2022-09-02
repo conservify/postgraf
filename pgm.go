@@ -23,7 +23,7 @@ type Query struct {
 var (
 	Queries = []*Query{
 		&Query{
-			Table: "db_stats",
+			Table: "pg_db_stats",
 			Tags:  []string{},
 			SQL: `
 select
@@ -56,7 +56,7 @@ where
 `,
 		},
 		&Query{
-			Table: "index_stats",
+			Table: "pg_index_stats",
 			Tags:  []string{"table_name", "schema", "index_name"},
 			SQL: `
 WITH q_locked_rels AS (
@@ -71,7 +71,6 @@ SELECT
   coalesce(idx_tup_fetch, 0) as idx_tup_fetch,
   coalesce(pg_relation_size(indexrelid), 0) as index_size_b,
   quote_ident(schemaname)||'.'||quote_ident(sui.indexrelname) as index_full_name_val,
-  regexp_replace(regexp_replace(pg_get_indexdef(sui.indexrelid),indexrelname,'X'), '^CREATE UNIQUE','CREATE') as index_def,
   case when not i.indisvalid then 1 else 0 end as is_invalid_int,
   case when i.indisprimary then 1 else 0 end as is_pk_int,
   case when i.indisunique or indisexclusion then 1 else 0 end as is_uq_or_exc
@@ -88,7 +87,7 @@ ORDER BY
 `,
 		},
 		&Query{
-			Table: "locks_mode",
+			Table: "pg_locks_mode",
 			Tags:  []string{"lockmode"},
 			SQL: `
 WITH q_locks AS (
@@ -108,7 +107,7 @@ FROM
 `,
 		},
 		&Query{
-			Table: "table_stats",
+			Table: "pg_table_stats",
 			Tags:  []string{"table_name", "schema"},
 			SQL: `
 select
@@ -156,7 +155,7 @@ where
 `,
 		},
 		&Query{
-			Table: "backends",
+			Table: "pg_backends",
 			Tags:  []string{},
 			SQL: `
 with sa_snapshot as (
@@ -241,10 +240,12 @@ func gatherQuery(ctx context.Context, o *options, conn *pgx.Conn, query *Query) 
 		for i, column := range q.FieldDescriptions() {
 			name := string(column.Name)
 
-			if ok := tags[name]; ok {
-				row.Tags[name] = values[i]
-			} else {
-				row.Fields[name] = values[i]
+			if values[i] != nil {
+				if ok := tags[name]; ok {
+					row.Tags[name] = values[i]
+				} else {
+					row.Fields[name] = values[i]
+				}
 			}
 		}
 
@@ -297,7 +298,17 @@ func gather(ctx context.Context, o *options) error {
 		return fmt.Errorf("(db-url): %v", err)
 	}
 
+	excluded := make(map[string]bool)
+
+	for _, name := range strings.Split(o.Exclude, ",") {
+		excluded[name] = true
+	}
+
 	for _, db := range dbs {
+		if excluded[db] {
+			continue
+		}
+
 		parsed.Path = db
 
 		conn, err := pgx.Connect(ctx, parsed.String())
@@ -307,7 +318,7 @@ func gather(ctx context.Context, o *options) error {
 
 		defer conn.Close(ctx)
 
-		now := time.Now().UTC().Format(time.RFC3339Nano)
+		now := time.Now().UTC().UnixNano()
 
 		for _, query := range Queries {
 			gathered, err := gatherQuery(ctx, o, conn, query)
@@ -321,14 +332,22 @@ func gather(ctx context.Context, o *options) error {
 				for key, value := range row.Tags {
 					fmt.Printf(",%v=%v", key, value)
 				}
+
 				first := true
 				for key, value := range row.Fields {
 					if first {
 						fmt.Printf(" ")
+						first = false
 					} else {
 						fmt.Printf(",")
 					}
-					fmt.Printf("%v=%v", key, value)
+
+					switch v := value.(type) {
+					case string:
+						fmt.Printf("%v=\"%v\"", key, strings.ReplaceAll(v, "\"", ""))
+					default:
+						fmt.Printf("%v=%v", key, value)
+					}
 				}
 				fmt.Printf(" %v\n", now)
 			}
@@ -339,9 +358,10 @@ func gather(ctx context.Context, o *options) error {
 }
 
 type options struct {
-	URL  string
-	Once bool
-	Tags string
+	URL     string
+	Once    bool
+	Exclude string
+	Tags    string
 }
 
 func (o *options) ParsedTags() map[string]string {
@@ -363,6 +383,7 @@ func main() {
 
 	flag.BoolVar(&o.Once, "once", false, "run once")
 	flag.StringVar(&o.Tags, "tags", "pgm", "tags")
+	flag.StringVar(&o.Exclude, "exclude", "rdsadmin", "Exclude")
 
 	flag.Parse()
 
