@@ -233,8 +233,6 @@ func gatherQuery(ctx context.Context, conn *pgx.Conn, query *Query) ([]*Row, err
 			Fields: make(map[string]interface{}),
 		}
 
-		// row.Tags['datname'] = ""
-
 		for i, column := range q.FieldDescriptions() {
 			name := string(column.Name)
 
@@ -295,7 +293,7 @@ func gather(ctx context.Context) error {
 		for _, query := range Queries {
 			gathered, err := gatherQuery(ctx, conn, query)
 			if err != nil {
-				return err
+				return fmt.Errorf("(qb-query) %v: %v", query.SQL, err)
 			}
 
 			for _, row := range gathered {
@@ -334,7 +332,7 @@ func main() {
 
 	if o.Once {
 		if err := gather(context.Background()); err != nil {
-			fmt.Printf("%v", err)
+			panic(err)
 		}
 
 		return
@@ -347,7 +345,7 @@ func main() {
 		<-c
 
 		if err := gather(context.Background()); err != nil {
-			fmt.Printf("%v", err)
+			panic(err)
 		}
 	}
 }
