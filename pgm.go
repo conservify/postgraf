@@ -1,28 +1,28 @@
 package main
 
 import (
-    "context"
-    "fmt"
-    "time"
-    "flag"
-    "os"
-    "os/signal"
-    "syscall"
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-    "github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4"
 )
 
 type Query struct {
 	Table string
-	SQL string
-	Tags []string
+	SQL   string
+	Tags  []string
 }
 
 var (
 	Queries = []*Query{
 		&Query{
 			Table: "db_stats",
-			Tags: []string{},
+			Tags:  []string{},
 			SQL: `
 select
   numbackends,
@@ -55,7 +55,7 @@ where
 		},
 		&Query{
 			Table: "index_stats",
-			Tags: []string{ "table_name", "schema", "index_name" },
+			Tags:  []string{"table_name", "schema", "index_name"},
 			SQL: `
 WITH q_locked_rels AS (
   select relation from pg_locks where mode = 'AccessExclusiveLock' and granted
@@ -87,7 +87,7 @@ ORDER BY
 		},
 		&Query{
 			Table: "locks_mode",
-			Tags: []string{ "lockmode" },
+			Tags:  []string{"lockmode"},
 			SQL: `
 WITH q_locks AS (
   select
@@ -107,7 +107,7 @@ FROM
 		},
 		&Query{
 			Table: "table_stats",
-			Tags: []string{ "table_name", "schema" },
+			Tags:  []string{"table_name", "schema"},
 			SQL: `
 select
   quote_ident(schemaname) as schema,
@@ -155,7 +155,7 @@ where
 		},
 		&Query{
 			Table: "backends",
-			Tags: []string{},
+			Tags:  []string{},
 			SQL: `
 with sa_snapshot as (
   select * from pg_stat_activity
@@ -200,9 +200,8 @@ select
 	}
 )
 
-
 type Row struct {
-	Tags map[string]interface{}
+	Tags   map[string]interface{}
 	Fields map[string]interface{}
 }
 
@@ -229,7 +228,7 @@ func gatherQuery(ctx context.Context, conn *pgx.Conn, query *Query) ([]*Row, err
 		}
 
 		row := &Row{
-			Tags: make(map[string]interface{}),
+			Tags:   make(map[string]interface{}),
 			Fields: make(map[string]interface{}),
 		}
 
@@ -304,7 +303,7 @@ func gather(ctx context.Context) error {
 				}
 				first := true
 				for key, value := range row.Fields {
-					if (first) {
+					if first {
 						fmt.Printf(" ")
 					} else {
 						fmt.Printf(",")
