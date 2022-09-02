@@ -249,7 +249,14 @@ func gatherQuery(ctx context.Context, conn *pgx.Conn, query *Query) ([]*Row, err
 	return rows, nil
 }
 
-func databaseNames(ctx context.Context, conn *pgx.Conn) ([]string, error) {
+func databaseNames(ctx context.Context, o *options) ([]string, error) {
+	conn, err := pgx.Connect(ctx, o.URL)
+	if err != nil {
+		return nil, fmt.Errorf("(db-conn): %v", err)
+	}
+
+	defer conn.Close(ctx)
+
 	rows, err := conn.Query(ctx, "SELECT datname FROM pg_database where datistemplate = false")
 	if err != nil {
 		return nil, err
@@ -274,32 +281,16 @@ func databaseNames(ctx context.Context, conn *pgx.Conn) ([]string, error) {
 	return databases, nil
 }
 
-func gather(ctx context.Context) error {
-	adminDatabaseUrl := os.Getenv("DATABASE_URL")
-
-	config, err := pgx.ParseConfig(adminDatabaseUrl)
-	if err != nil {
-		return fmt.Errorf("(db-config): %v", err)
-	}
-
-	conn, err := pgx.ConnectConfig(ctx, config)
-	if err != nil {
-		return fmt.Errorf("(db-conn): %v", err)
-	}
-
-	defer conn.Close(ctx)
-
-	dbs, err := databaseNames(ctx, conn)
+func gather(ctx context.Context, o *options) error {
+	dbs, err := databaseNames(ctx, o)
 	if err != nil {
 		return fmt.Errorf("(db-names): %v", err)
 	}
 
-	parsed, err := url.Parse(adminDatabaseUrl)
+	parsed, err := url.Parse(o.URL)
 	if err != nil {
 		return fmt.Errorf("(db-url): %v", err)
 	}
-
-	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	for _, db := range dbs {
 		parsed.Path = db
@@ -310,6 +301,8 @@ func gather(ctx context.Context) error {
 		}
 
 		defer conn.Close(ctx)
+
+		now := time.Now().UTC().Format(time.RFC3339Nano)
 
 		for _, query := range Queries {
 			gathered, err := gatherQuery(ctx, conn, query)
@@ -341,18 +334,25 @@ func gather(ctx context.Context) error {
 }
 
 type options struct {
+	URL  string
 	Once bool
+	Tags string
 }
 
 func main() {
-	o := &options{}
+	o := &options{
+		URL: os.Getenv("DATABASE_URL"),
+	}
 
 	flag.BoolVar(&o.Once, "once", false, "run once")
+	flag.StringVar(&o.Tags, "tags", "pgm", "tags")
 
 	flag.Parse()
 
+	ctx := context.Background()
+
 	if o.Once {
-		if err := gather(context.Background()); err != nil {
+		if err := gather(ctx, o); err != nil {
 			panic(err)
 		}
 
@@ -365,7 +365,7 @@ func main() {
 	for {
 		<-c
 
-		if err := gather(context.Background()); err != nil {
+		if err := gather(ctx, o); err != nil {
 			panic(err)
 		}
 	}
