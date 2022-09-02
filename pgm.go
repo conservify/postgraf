@@ -21,11 +21,6 @@ type Query struct {
 var (
 	Queries = []*Query{
 		&Query{
-			Table: "simple_values",
-			Tags: []string{},
-			SQL: "SELECT 10 AS value",
-		},
-		&Query{
 			Table: "db_stats",
 			Tags: []string{},
 			SQL: `
