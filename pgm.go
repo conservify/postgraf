@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -274,7 +275,14 @@ func databaseNames(ctx context.Context, conn *pgx.Conn) ([]string, error) {
 }
 
 func gather(ctx context.Context) error {
-	conn, err := pgx.Connect(ctx, os.Getenv("DATABASE_URL"))
+	adminDatabaseUrl := os.Getenv("DATABASE_URL")
+
+	config, err := pgx.ParseConfig(adminDatabaseUrl)
+	if err != nil {
+		return fmt.Errorf("(db-config): %v", err)
+	}
+
+	conn, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
 		return fmt.Errorf("(db-conn): %v", err)
 	}
@@ -286,9 +294,23 @@ func gather(ctx context.Context) error {
 		return fmt.Errorf("(db-names): %v", err)
 	}
 
-	now := time.Now()
+	parsed, err := url.Parse(adminDatabaseUrl)
+	if err != nil {
+		return fmt.Errorf("(db-url): %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	for _, db := range dbs {
+		parsed.Path = db
+
+		conn, err := pgx.Connect(ctx, parsed.String())
+		if err != nil {
+			return fmt.Errorf("(db-conn): %v", err)
+		}
+
+		defer conn.Close(ctx)
+
 		for _, query := range Queries {
 			gathered, err := gatherQuery(ctx, conn, query)
 			if err != nil {
