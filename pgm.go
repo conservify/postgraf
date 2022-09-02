@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -206,7 +207,7 @@ type Row struct {
 	Fields map[string]interface{}
 }
 
-func gatherQuery(ctx context.Context, conn *pgx.Conn, query *Query) ([]*Row, error) {
+func gatherQuery(ctx context.Context, o *options, conn *pgx.Conn, query *Query) ([]*Row, error) {
 	q, err := conn.Query(ctx, query.SQL)
 	if err != nil {
 		return nil, err
@@ -233,10 +234,14 @@ func gatherQuery(ctx context.Context, conn *pgx.Conn, query *Query) ([]*Row, err
 			Fields: make(map[string]interface{}),
 		}
 
+		for key, value := range o.ParsedTags() {
+			row.Tags[key] = value
+		}
+
 		for i, column := range q.FieldDescriptions() {
 			name := string(column.Name)
 
-			if ok, _ := tags[name]; ok {
+			if ok := tags[name]; ok {
 				row.Tags[name] = values[i]
 			} else {
 				row.Fields[name] = values[i]
@@ -305,7 +310,7 @@ func gather(ctx context.Context, o *options) error {
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 
 		for _, query := range Queries {
-			gathered, err := gatherQuery(ctx, conn, query)
+			gathered, err := gatherQuery(ctx, o, conn, query)
 			if err != nil {
 				return fmt.Errorf("(qb-query) %v: %v", query.SQL, err)
 			}
@@ -337,6 +342,18 @@ type options struct {
 	URL  string
 	Once bool
 	Tags string
+}
+
+func (o *options) ParsedTags() map[string]string {
+	parsed := make(map[string]string)
+	expressions := strings.Split(o.Tags, ",")
+	for _, expression := range expressions {
+		maybePair := strings.Split(expression, "=")
+		if len(maybePair) == 2 {
+			parsed[maybePair[0]] = maybePair[1]
+		}
+	}
+	return parsed
 }
 
 func main() {
