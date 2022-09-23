@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v5"
 )
 
 type Query struct {
@@ -202,11 +202,51 @@ select
 )
 
 type Row struct {
-	Tags   map[string]interface{}
-	Fields map[string]interface{}
+	Measure string
+	Tags    map[string]interface{}
+	Fields  map[string]interface{}
 }
 
-func gatherQuery(ctx context.Context, o *options, conn *pgx.Conn, query *Query) ([]*Row, error) {
+type Gathered struct {
+	Rows []*Row
+}
+
+func (g *Gathered) Combine(o *Gathered) *Gathered {
+	g.Rows = append(g.Rows, o.Rows...)
+	return g
+}
+
+func (g *Gathered) Write(now int64, db string) error {
+	for _, row := range g.Rows {
+		fmt.Printf("%v", row.Measure)
+		fmt.Printf(",datname=%s", db)
+		for key, value := range row.Tags {
+			fmt.Printf(",%v=%v", key, value)
+		}
+
+		first := true
+		for key, value := range row.Fields {
+			if first {
+				fmt.Printf(" ")
+				first = false
+			} else {
+				fmt.Printf(",")
+			}
+
+			switch v := value.(type) {
+			case string:
+				fmt.Printf("%v=\"%v\"", key, strings.ReplaceAll(v, "\"", ""))
+			default:
+				fmt.Printf("%v=%v", key, value)
+			}
+		}
+		fmt.Printf(" %v\n", now)
+	}
+
+	return nil
+}
+
+func gatherQuery(ctx context.Context, o *options, conn *pgx.Conn, query *Query) (*Gathered, error) {
 	q, err := conn.Query(ctx, query.SQL)
 	if err != nil {
 		return nil, err
@@ -229,8 +269,9 @@ func gatherQuery(ctx context.Context, o *options, conn *pgx.Conn, query *Query) 
 		}
 
 		row := &Row{
-			Tags:   make(map[string]interface{}),
-			Fields: make(map[string]interface{}),
+			Measure: query.Table,
+			Tags:    make(map[string]interface{}),
+			Fields:  make(map[string]interface{}),
 		}
 
 		for key, value := range o.ParsedTags() {
@@ -252,7 +293,32 @@ func gatherQuery(ctx context.Context, o *options, conn *pgx.Conn, query *Query) 
 		rows = append(rows, row)
 	}
 
-	return rows, nil
+	return &Gathered{Rows: rows}, nil
+}
+
+func queryStringArray(ctx context.Context, conn *pgx.Conn, sql string) ([]string, error) {
+	rows, err := conn.Query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	values := []string{}
+
+	for rows.Next() {
+		var name string
+
+		rows.Scan(&name)
+
+		values = append(values, name)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return values, nil
 }
 
 func databaseNames(ctx context.Context, o *options) ([]string, error) {
@@ -263,28 +329,79 @@ func databaseNames(ctx context.Context, o *options) ([]string, error) {
 
 	defer conn.Close(ctx)
 
-	rows, err := conn.Query(ctx, "SELECT datname FROM pg_database where datistemplate = false")
+	return queryStringArray(ctx, conn, "SELECT datname FROM pg_database where datistemplate = false")
+}
+
+func tableNames(ctx context.Context, conn *pgx.Conn) ([]string, error) {
+	return queryStringArray(ctx, conn, "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname != 'pg_catalog' AND schemaname != 'information_schema'")
+}
+
+func gatherQueries(ctx context.Context, o *options, conn *pgx.Conn, queries []*Query) (*Gathered, error) {
+	g := &Gathered{}
+
+	for _, query := range queries {
+		if gathered, err := gatherQuery(ctx, o, conn, query); err != nil {
+			return nil, fmt.Errorf("(db-query) %v: %v", query.SQL, err)
+		} else {
+			g = g.Combine(gathered)
+		}
+	}
+
+	return g, nil
+}
+
+func gatherGueJobs(ctx context.Context, o *options, conn *pgx.Conn) (*Gathered, error) {
+	queries := []*Query{
+		&Query{
+			Table: "pg_gue_jobs",
+			Tags:  []string{"job_type", "queue"},
+			SQL: `
+SELECT 
+CASE WHEN queue = '' THEN 'none' ELSE queue END AS queue,
+job_type, COUNT(*) AS queue_length,
+EXTRACT(EPOCH FROM NOW() - MIN(created_at)) AS oldest_age,
+EXTRACT(EPOCH FROM NOW() - MAX(created_at)) AS newest_age
+FROM gue_jobs
+WHERE run_at < NOW()
+GROUP BY queue, job_type;
+`,
+		},
+		&Query{
+			Table: "pg_gue_job_errors",
+			Tags:  []string{"job_type", "queue"},
+			SQL: `
+SELECT
+CASE WHEN queue = '' THEN 'none' ELSE queue END AS queue,
+job_type, COUNT(*) AS error_length
+FROM gue_jobs
+WHERE run_at > NOW()
+GROUP BY queue, job_type;
+`,
+		},
+	}
+
+	return gatherQueries(ctx, o, conn, queries)
+}
+
+func gatherSpecials(ctx context.Context, o *options, conn *pgx.Conn) (*Gathered, error) {
+	tables, err := tableNames(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
 
-	defer rows.Close()
+	g := &Gathered{}
 
-	databases := []string{}
-
-	for rows.Next() {
-		var name string
-
-		rows.Scan(&name)
-
-		databases = append(databases, name)
+	for _, table := range tables {
+		if table == "gue_jobs" {
+			if more, err := gatherGueJobs(ctx, o, conn); err != nil {
+				return nil, err
+			} else {
+				g = g.Combine(more)
+			}
+		}
 	}
 
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return databases, nil
+	return g, nil
 }
 
 func gather(ctx context.Context, o *options) error {
@@ -321,35 +438,20 @@ func gather(ctx context.Context, o *options) error {
 		now := time.Now().UTC().UnixNano()
 
 		for _, query := range Queries {
-			gathered, err := gatherQuery(ctx, o, conn, query)
-			if err != nil {
-				return fmt.Errorf("(qb-query) %v: %v", query.SQL, err)
+			if gathered, err := gatherQuery(ctx, o, conn, query); err != nil {
+				return fmt.Errorf("(db-query) %v: %v", query.SQL, err)
+			} else {
+				if err := gathered.Write(now, db); err != nil {
+					return err
+				}
 			}
+		}
 
-			for _, row := range gathered {
-				fmt.Printf("%v", query.Table)
-				fmt.Printf(",datname=%s", db)
-				for key, value := range row.Tags {
-					fmt.Printf(",%v=%v", key, value)
-				}
-
-				first := true
-				for key, value := range row.Fields {
-					if first {
-						fmt.Printf(" ")
-						first = false
-					} else {
-						fmt.Printf(",")
-					}
-
-					switch v := value.(type) {
-					case string:
-						fmt.Printf("%v=\"%v\"", key, strings.ReplaceAll(v, "\"", ""))
-					default:
-						fmt.Printf("%v=%v", key, value)
-					}
-				}
-				fmt.Printf(" %v\n", now)
+		if gathered, err := gatherSpecials(ctx, o, conn); err != nil {
+			return fmt.Errorf("(db-special): %v", err)
+		} else {
+			if err := gathered.Write(now, db); err != nil {
+				return err
 			}
 		}
 	}
