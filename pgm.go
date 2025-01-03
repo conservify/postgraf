@@ -45,7 +45,7 @@ select
   blk_write_time,
   extract(epoch from (now() - pg_postmaster_start_time()))::int8
     as postmaster_uptime_s,
-  extract(epoch from (now() - pg_backup_start_time()))::int8
+  0
     as backup_duration_s,
   case when pg_is_in_recovery() then 1 else 0 end
     as in_recovery_int
@@ -359,8 +359,8 @@ func gatherGueJobs(ctx context.Context, o *options, conn *pgx.Conn) (*Gathered, 
 SELECT 
 CASE WHEN queue = '' THEN 'none' ELSE queue END AS queue,
 job_type, COUNT(*) AS queue_length,
-EXTRACT(EPOCH FROM NOW() - MIN(created_at)) AS oldest_age,
-EXTRACT(EPOCH FROM NOW() - MAX(created_at)) AS newest_age
+EXTRACT(SECONDS FROM NOW() - MIN(created_at))::real AS oldest_age,
+EXTRACT(SECONDS FROM NOW() - MAX(created_at))::real AS newest_age
 FROM gue_jobs
 WHERE run_at < NOW()
 GROUP BY queue, job_type;
